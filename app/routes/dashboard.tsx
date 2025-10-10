@@ -2,12 +2,16 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { getSession, signOut, supabase, updatePassword, updateUserProfile, getPlantingPhases, createPlantingPhase, updatePlantingPhase, deletePlantingPhase, getFertigationLands, updateFertigationLand, getIrrigationSchedules, createIrrigationSchedule, updateIrrigationSchedule, deleteIrrigationSchedule, getIrrigationSchedulesByPhase } from '../lib/supabase';
 import type { PlantingPhase, FertigationLand, IrrigationSchedule } from '../lib/supabase';
+import { subscribeTopic, unsubscribeTopic, publish, mqttTopics, sendIrrigationConfig, type IrrigationConfig } from '../lib/mqtt';
+import MqttManager from '../lib/mqttManager';
 import '../styles/auth.scss';
 
 export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [activeMenu, setActiveMenu] = useState('dashboard');
   const [user, setUser] = useState<any>(null);
+  const [mqttConnected, setMqttConnected] = useState(false);
+  const [mqttStatus, setMqttStatus] = useState('Belum terhubung');
   const [userProfile, setUserProfile] = useState({
     full_name: '',
     phone: '',
@@ -34,6 +38,18 @@ export default function Dashboard() {
 
   // VFD frequency state for pump control
   const [pumpFrequency, setPumpFrequency] = useState(50); // Default 50 Hz
+  
+  // Sensor data state
+  const [sensorData, setSensorData] = useState({
+    waterFlow: 0,      // L/min
+    pressure: 0,       // Bar
+    ec: 0,             // μs/cm
+    ph: 0,             // pH
+    nitrogen: 0,       // mg/kg
+    phosphorus: 0,     // mg/kg
+    potassium: 0,      // mg/kg
+    temperature: 0     // °C
+  });
 
   // Planting phases states
   const [plantingPhases, setPlantingPhases] = useState<PlantingPhase[]>([]);
@@ -63,14 +79,72 @@ export default function Dashboard() {
   // Fertigation management phase schedules
   const [fertigationPhaseSchedules, setFertigationPhaseSchedules] = useState<{[phaseId: string]: IrrigationSchedule[]}>({});
 
+  // Map UI controls to relay numbers
+  const relayMapping = {
+    valve1: 1, // Nutrisi
+    valve2: 2, // Air
+    valve3: 3, // Lahan 1
+    valve4: 4, // Lahan 2
+    valve5: 5, // Lahan 3
+    pump: 6    // Pompa
+  };
+
   const toggleRelay = (relayName: keyof typeof relayStates) => {
+    // Update local state
+    const newState = !relayStates[relayName];
     setRelayStates(prev => ({
       ...prev,
-      [relayName]: !prev[relayName]
+      [relayName]: newState
     }));
+    
+    // Publish to MQTT
+    const relayNumber = relayMapping[relayName];
+    const message = { [`relay${relayNumber}`]: newState ? "on" : "off" };
+    
+    console.log(`Publishing control message for ${relayName}:`, message);
+    publish(mqttTopics.control, message);
+  };
+
+  // Handler untuk menerima data sensor dari MQTT
+  const handleSensorData = (message: string) => {
+    try {
+      // Clean up the message before parsing
+      // Remove any extra spaces, newlines, or special characters that might cause parsing issues
+      let cleanMessage = message.trim();
+      
+      // Try to handle the case where the message might be a string representation of an object
+      if (cleanMessage.startsWith("{ ") && cleanMessage.endsWith(" }")) {
+        // Convert the string representation to a proper JSON string
+        cleanMessage = cleanMessage.replace(/(['"])?([a-zA-Z0-9_]+)(['"])?:/g, '"$2":');
+        // Replace single quotes with double quotes for JSON compatibility
+        cleanMessage = cleanMessage.replace(/'/g, '"');
+      }
+      
+      const data = JSON.parse(cleanMessage);
+      console.log('Received sensor data:', data);
+      
+      // Update sensor data state dengan data yang diterima
+      setSensorData({
+        waterFlow: data.waterFlow || data.water_flow || 0,
+        pressure: data.pressure || 0,
+        ec: data.ec || data.conductivity || 0,
+        ph: data.ph || 0,
+        nitrogen: data.nitrogen || data.n || 0,
+        phosphorus: data.phosphorus || data.p || 0,
+        potassium: data.potassium || data.k || 0,
+        temperature: data.temperature || data.temp || 0
+      });
+    } catch (error) {
+      console.error('Error parsing sensor data:', error);
+      // Log the problematic message for debugging
+      console.log('Problematic message:', message);
+    }
   };
 
   useEffect(() => {
+    const mqttManager = MqttManager.getInstance();
+    let connectionCleanup: (() => void) | null = null;
+
     const checkSession = async () => {
       try {
         const { data: session } = await getSession();
@@ -87,15 +161,49 @@ export default function Dashboard() {
           loadPlantingPhases();
           // Load fertigation data
           loadFertigationData();
+          
+          // Setup MQTT connection with manager
+          setMqttStatus('Menghubungkan...');
+          
+          // Listen to connection status changes
+          connectionCleanup = mqttManager.onConnectionChange((connected) => {
+            setMqttConnected(connected);
+            if (connected) {
+              setMqttStatus('Terhubung ke MQTT broker');
+              // Subscribe ke topik sensor
+              subscribeTopic('silagung/sensor', handleSensorData);
+            } else {
+              setMqttStatus('Koneksi MQTT terputus');
+            }
+          });
+
+          // Attempt connection
+          mqttManager.connect().catch((mqttError) => {
+            console.error('MQTT connection error:', mqttError);
+            setMqttStatus(`Gagal terhubung ke MQTT broker: ${mqttError?.message || 'Unknown error'}`);
+          });
         }
       } catch (error) {
+        console.error('Session check error:', error);
         navigate('/login');
       } finally {
+        // Pastikan loading selalu di-set ke false
         setLoading(false);
       }
     };
     checkSession();
+    
+    // Cleanup: Putuskan koneksi MQTT saat komponen unmount
+    return () => {
+      unsubscribeTopic('silagung/sensor');
+      if (connectionCleanup) {
+        connectionCleanup();
+      }
+      mqttManager.disconnect();
+    };
   }, [navigate]);
+
+
 
   const handleSignOut = async () => {
     await signOut();
@@ -266,9 +374,91 @@ export default function Dashboard() {
         return;
       }
       // Reload data to get updated phase info
-      loadFertigationData();
+      await loadFertigationData();
+      
+      // Send irrigation configuration to ESP32 via MQTT
+      await sendIrrigationConfigToESP32(landId, phaseId);
     } catch (error) {
       console.error('Error updating land phase:', error);
+    }
+  };
+
+  // Function to send irrigation configuration to ESP32
+  const sendIrrigationConfigToESP32 = async (landId: string, phaseId: string) => {
+    try {
+      // Find the land and phase data
+      const land = fertigationLands.find(l => l.id === landId);
+      const phase = plantingPhases.find(p => p.id === phaseId);
+      
+      if (!land || !phase) {
+        console.error('Land or phase not found for MQTT config');
+        return;
+      }
+
+      // Get irrigation schedules for this phase
+      const { data: schedules, error: schedulesError } = await getIrrigationSchedulesByPhase(phaseId);
+      if (schedulesError) {
+        console.error('Error getting irrigation schedules:', schedulesError);
+        return;
+      }
+
+      // Calculate water per schedule based on active schedules
+      const activeSchedules = (schedules || []).filter(schedule => schedule.is_active);
+      const activeScheduleCount = activeSchedules.length;
+      const waterPerSchedule = activeScheduleCount > 0 ? 
+        Math.round((phase.kebutuhan_air || 0) / activeScheduleCount * 100) / 100 : // Round to 2 decimal places
+        0;
+
+      // Prepare irrigation configuration data
+      const irrigationConfig: IrrigationConfig = {
+        landName: land.name,
+        phaseName: phase.nama_fase_tanam,
+        waterRequirement: phase.kebutuhan_air || 0,
+        waterPerSchedule: waterPerSchedule,
+        targetEC: phase.target_ec || 0,
+        irrigationType: phase.jenis_irigasi,
+        schedules: (schedules || []).map(schedule => ({
+          time: schedule.time,
+          isActive: schedule.is_active
+        }))
+      };
+
+      // Send to ESP32 via MQTT
+      const success = sendIrrigationConfig(irrigationConfig);
+      
+      if (success) {
+        console.log('Irrigation configuration sent to ESP32 successfully');
+      } else {
+        console.error('Failed to send irrigation configuration to ESP32');
+      }
+    } catch (error) {
+      console.error('Error sending irrigation config to ESP32:', error);
+    }
+  };
+
+  // Function to send all lands configuration to ESP32
+  const sendAllLandsConfigToESP32 = async () => {
+    try {
+      let successCount = 0;
+      let totalLands = 0;
+
+      for (const land of fertigationLands) {
+        if (land.current_phase_id) {
+          totalLands++;
+          await sendIrrigationConfigToESP32(land.id, land.current_phase_id);
+          successCount++;
+          // Add small delay between sends to avoid overwhelming MQTT
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+
+      if (successCount > 0) {
+        console.log(`Successfully sent configuration for ${successCount}/${totalLands} lands to ESP32`);
+      } else {
+        console.log('No configured lands found to send to ESP32');
+      }
+    } catch (error) {
+      console.error('Error sending all lands config to ESP32:', error);
     }
   };
 
@@ -365,10 +555,28 @@ export default function Dashboard() {
       
       // Reload schedules for this phase
       await loadPhaseIrrigationSchedules(phaseId);
+      
+      // Send updated irrigation configuration to ESP32 for all lands using this phase
+      await sendPhaseConfigToESP32(phaseId);
     } catch (error) {
       console.error('Error adding phase irrigation schedule:', error);
     } finally {
       setIsPhaseScheduleLoading(false);
+    }
+  };
+
+  // Function to send phase configuration to ESP32 for all lands using this phase
+  const sendPhaseConfigToESP32 = async (phaseId: string) => {
+    try {
+      // Find all lands using this phase
+      const landsUsingPhase = fertigationLands.filter(land => land.current_phase_id === phaseId);
+      
+      // Send configuration for each land using this phase
+      for (const land of landsUsingPhase) {
+        await sendIrrigationConfigToESP32(land.id, phaseId);
+      }
+    } catch (error) {
+      console.error('Error sending phase config to ESP32:', error);
     }
   };
 
@@ -398,6 +606,9 @@ export default function Dashboard() {
       
       // Reload schedules for this phase
       await loadPhaseIrrigationSchedules(phaseId);
+      
+      // Send updated irrigation configuration to ESP32 for all lands using this phase
+      await sendPhaseConfigToESP32(phaseId);
     } catch (error) {
       console.error('Error updating phase irrigation schedule:', error);
     }
@@ -437,6 +648,142 @@ export default function Dashboard() {
     }
   };
 
+  // Render the direct control panel
+  const renderDirectControlPanel = () => {
+    return (
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h2 className="text-xl font-semibold text-gray-800 mb-4">Kontrol Langsung</h2>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Valve Controls */}
+          <div className="bg-gray-50 p-4 rounded-lg">
+            <h3 className="text-lg font-medium text-gray-700 mb-3">Kontrol Valve</h3>
+            
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Valve Nutrisi</span>
+                <button
+                  onClick={() => toggleRelay('valve1')}
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                    relayStates.valve1 
+                      ? 'bg-green-500 text-white' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  {relayStates.valve1 ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Valve Air</span>
+                <button
+                  onClick={() => toggleRelay('valve2')}
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                    relayStates.valve2 
+                      ? 'bg-green-500 text-white' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  {relayStates.valve2 ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Valve Lahan 1</span>
+                <button
+                  onClick={() => toggleRelay('valve3')}
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                    relayStates.valve3 
+                      ? 'bg-green-500 text-white' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  {relayStates.valve3 ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Valve Lahan 2</span>
+                <button
+                  onClick={() => toggleRelay('valve4')}
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                    relayStates.valve4 
+                      ? 'bg-green-500 text-white' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  {relayStates.valve4 ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Valve Lahan 3</span>
+                <button
+                  onClick={() => toggleRelay('valve5')}
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                    relayStates.valve5 
+                      ? 'bg-green-500 text-white' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  {relayStates.valve5 ? 'ON' : 'OFF'}
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          {/* Pump Control */}
+          <div className="bg-gray-50 p-4 rounded-lg">
+            <h3 className="text-lg font-medium text-gray-700 mb-3">Kontrol Pompa</h3>
+            
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Pompa</span>
+                <button
+                  onClick={() => toggleRelay('pump')}
+                  className={`px-4 py-2 rounded-md font-medium transition-colors ${
+                    relayStates.pump 
+                      ? 'bg-green-500 text-white' 
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  {relayStates.pump ? 'ON' : 'OFF'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        {/* Sensor Data Display */}
+        <div className="mt-8">
+          <h3 className="text-lg font-medium text-gray-700 mb-3">Data Sensor</h3>
+          
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-blue-50 p-3 rounded-lg">
+              <div className="text-sm text-blue-700">Aliran Air</div>
+              <div className="text-xl font-semibold">{sensorData.waterFlow} L/min</div>
+            </div>
+            
+            <div className="bg-green-50 p-3 rounded-lg">
+              <div className="text-sm text-green-700">Tekanan</div>
+              <div className="text-xl font-semibold">{sensorData.pressure} Bar</div>
+            </div>
+            
+            <div className="bg-purple-50 p-3 rounded-lg">
+              <div className="text-sm text-purple-700">EC</div>
+              <div className="text-xl font-semibold">{sensorData.ec} μs/cm</div>
+            </div>
+            
+            <div className="bg-yellow-50 p-3 rounded-lg">
+              <div className="text-sm text-yellow-700">pH</div>
+              <div className="text-xl font-semibold">{sensorData.ph}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   if (loading) {
     return <div className="min-h-screen bg-gray-50 flex items-center justify-center">Loading...</div>;
   }
@@ -448,6 +795,17 @@ export default function Dashboard() {
         <div className="p-6 border-b border-gray-200">
           <h2 className="text-2xl font-bold text-blue-600">SiLagung</h2>
           <p className="text-sm text-gray-500 mt-1">Smart Fertigation System</p>
+          
+          {/* MQTT Status */}
+          <div className="mt-4 p-3 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium">MQTT Status:</span>
+              <span className={`text-xs px-2 py-1 rounded ${mqttConnected ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                {mqttConnected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
+            <p className="text-xs text-gray-500">{mqttStatus}</p>
+          </div>
         </div>
         
         <nav className="mt-6">
@@ -553,7 +911,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Water Flow</p>
-                    <p className="text-2xl font-bold text-gray-900">15.2</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.waterFlow.toFixed(1)}</p>
                     <p className="text-sm text-blue-600 mt-1">L/min</p>
                   </div>
                   <div className="p-3 bg-blue-50 rounded-full">
@@ -570,7 +928,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Pressure</p>
-                    <p className="text-2xl font-bold text-gray-900">2.4</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.pressure.toFixed(1)}</p>
                     <p className="text-sm text-green-600 mt-1">Bar</p>
                   </div>
                   <div className="p-3 bg-green-50 rounded-full">
@@ -596,7 +954,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">EC (Conductivity)</p>
-                    <p className="text-2xl font-bold text-gray-900">1.8</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.ec.toFixed(1)}</p>
                     <p className="text-sm text-yellow-600 mt-1">us/cm</p>
                   </div>
                   <div className="p-3 bg-yellow-50 rounded-full">
@@ -612,7 +970,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">pH Level</p>
-                    <p className="text-2xl font-bold text-gray-900">6.5</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.ph.toFixed(1)}</p>
                     <p className="text-sm text-purple-600 mt-1">pH</p>
                   </div>
                   <div className="p-3 bg-purple-50 rounded-full flex items-center justify-center">
@@ -629,7 +987,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Nitrogen (N)</p>
-                    <p className="text-2xl font-bold text-gray-900">45</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.nitrogen.toFixed(0)}</p>
                     <p className="text-sm text-indigo-600 mt-1">mg/kg(mg/L)</p>
                   </div>
                   <div className="p-3 bg-indigo-50 rounded-full">
@@ -643,7 +1001,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Phosphorus (P)</p>
-                    <p className="text-2xl font-bold text-gray-900">12</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.phosphorus.toFixed(0)}</p>
                     <p className="text-sm text-orange-600 mt-1">mg/kg(mg/L)</p>
                   </div>
                   <div className="p-3 bg-blue-50 rounded-full flex items-center justify-center">
@@ -657,7 +1015,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Potassium (K)</p>
-                    <p className="text-2xl font-bold text-gray-900">38</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.potassium.toFixed(0)}</p>
                     <p className="text-sm text-pink-600 mt-1">mg/kg(mg/L)</p>
                   </div>
                   <div className="p-3 bg-pink-50 rounded-full">
@@ -671,7 +1029,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Temperature</p>
-                    <p className="text-2xl font-bold text-gray-900">28.5</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.temperature.toFixed(1)}</p>
                     <p className="text-sm text-red-600 mt-1">°C</p>
                   </div>
                   <div className="p-3 bg-red-50 rounded-full">
@@ -698,15 +1056,8 @@ export default function Dashboard() {
                     { num: 4, label: 'Lahan 2', type: 'lahan' },
                     { num: 5, label: 'Lahan 3', type: 'lahan' }
                   ].map(({ num, label, type }) => {
-                    // Get current active phase irrigation type from any active land
-                    const activeLand = fertigationLands.find(land => land.current_phase_id);
-                    const activePhase = activeLand ? plantingPhases.find(p => p.id === activeLand.current_phase_id) : null;
-                    const currentIrrigationType = activePhase?.jenis_irigasi;
-                    
-                    // Determine if this valve should be disabled based on irrigation type
-                    const isDisabled = currentIrrigationType && (
-                      (type === 'nutrisi' && currentIrrigationType === 'air')
-                    );
+                    // Allow all valves to be controlled manually regardless of irrigation type
+                    const isDisabled = false;
                     
                     return (
                       <div key={num} className={`p-4 rounded-lg ${isDisabled ? 'bg-gray-100 opacity-50' : 'bg-gray-50'}`}>
@@ -748,12 +1099,6 @@ export default function Dashboard() {
                             />
                           </button>
                         </div>
-                        
-                        {isDisabled && (
-                          <div className="mt-2 text-xs text-red-500">
-                            {type === 'nutrisi' && currentIrrigationType === 'air' && 'Tidak diperlukan untuk irigasi air saja'}
-                          </div>
-                        )}
                       </div>
                     );
                   })}
@@ -828,7 +1173,7 @@ export default function Dashboard() {
                             background: `linear-gradient(to right, #3B82F6 0%, #3B82F6 ${(pumpFrequency / 60) * 100}%, #E5E7EB ${(pumpFrequency / 60) * 100}%, #E5E7EB 100%)`
                           }}
                         />
-                        <style jsx>{`
+                        <style jsx="true">{`
                           input[type="range"]::-webkit-slider-thumb {
                             appearance: none;
                             width: 20px;
@@ -888,7 +1233,20 @@ export default function Dashboard() {
                   </svg>
                 </div>
                 <h2 className="text-2xl font-bold text-gray-900 mb-2">Manajemen Fertigasi</h2>
-                <p className="text-gray-600 mb-6">Kelola jadwal penyiraman dan fase tanam untuk setiap lahan fertigasi.</p>
+                <p className="text-gray-600 mb-4">Kelola jadwal penyiraman dan fase tanam untuk setiap lahan fertigasi.</p>
+                
+                {/* Send All Button */}
+                <div className="mt-6">
+                  <button
+                    onClick={sendAllLandsConfigToESP32}
+                    className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-colors font-medium text-sm inline-flex items-center space-x-2"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                    </svg>
+                    <span>Save Konfigurasi</span>
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -990,11 +1348,9 @@ export default function Dashboard() {
                       }`}>
                         {land.current_phase_id ? 'Fase Aktif' : 'Belum Dikonfigurasi'}
                       </div>
-                      {land.current_phase_id && (
-                        <p className="text-xs text-gray-500 mt-2">
-                          Jadwal penyiraman diatur di menu Konfigurasi Fase
-                        </p>
-                      )}
+                      <p className="text-xs text-gray-500 mt-4">
+                        Jadwal penyiraman diatur di menu Konfigurasi Fase
+                      </p>
                     </div>
                   </div>
                 );
