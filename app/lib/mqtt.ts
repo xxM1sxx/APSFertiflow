@@ -287,6 +287,7 @@ export const unsubscribeTopic = (topic: string): void => {
  * Interface for irrigation configuration data
  */
 export interface IrrigationConfig {
+  configId: number; // Unique identifier for each configuration
   landName: string;
   phaseName: string;
   waterRequirement: number; // L/hari (total kebutuhan harian)
@@ -300,6 +301,15 @@ export interface IrrigationConfig {
 }
 
 /**
+ * Interface for multiple irrigation configurations in one payload
+ */
+export interface MultipleIrrigationConfig {
+  configs: IrrigationConfig[];
+  timestamp: number;
+  totalConfigs: number;
+}
+
+/**
  * Send irrigation configuration to ESP32
  */
 export const sendIrrigationConfig = (config: IrrigationConfig): boolean => {
@@ -307,6 +317,24 @@ export const sendIrrigationConfig = (config: IrrigationConfig): boolean => {
   const message = JSON.stringify(config);
   
   console.log('Sending irrigation config to ESP32:', config);
+  
+  return publish(topic, message, true); // retain = true untuk menyimpan konfigurasi terakhir
+};
+
+/**
+ * Send multiple irrigation configurations to ESP32 in one JSON payload
+ */
+export const sendMultipleIrrigationConfigs = (configs: IrrigationConfig[]): boolean => {
+  const topic = mqttTopics.irrigationConfig;
+  const payload: MultipleIrrigationConfig = {
+    configs: configs,
+    timestamp: Date.now(),
+    totalConfigs: configs.length
+  };
+  const message = JSON.stringify(payload);
+  
+  console.log('Sending multiple irrigation configs to ESP32:', payload);
+  console.log(`Total configs in batch: ${configs.length}`);
   
   return publish(topic, message, true); // retain = true untuk menyimpan konfigurasi terakhir
 };

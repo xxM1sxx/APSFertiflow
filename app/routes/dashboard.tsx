@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { getSession, signOut, supabase, updatePassword, updateUserProfile, getPlantingPhases, createPlantingPhase, updatePlantingPhase, deletePlantingPhase, getFertigationLands, updateFertigationLand, getIrrigationSchedules, createIrrigationSchedule, updateIrrigationSchedule, deleteIrrigationSchedule, getIrrigationSchedulesByPhase } from '../lib/supabase';
 import type { PlantingPhase, FertigationLand, IrrigationSchedule } from '../lib/supabase';
-import { subscribeTopic, unsubscribeTopic, publish, mqttTopics, sendIrrigationConfig, type IrrigationConfig } from '../lib/mqtt';
+import { subscribeTopic, unsubscribeTopic, publish, mqttTopics, sendIrrigationConfig, sendMultipleIrrigationConfigs, type IrrigationConfig } from '../lib/mqtt';
 import MqttManager from '../lib/mqttManager';
 import '../styles/auth.scss';
 
@@ -376,8 +376,8 @@ export default function Dashboard() {
       // Reload data to get updated phase info
       await loadFertigationData();
       
-      // Send irrigation configuration to ESP32 via MQTT
-      await sendIrrigationConfigToESP32(landId, phaseId);
+      // Send all lands configuration to ESP32 via MQTT in one batch
+      await sendAllLandsConfigToESP32();
     } catch (error) {
       console.error('Error updating land phase:', error);
     }
@@ -409,8 +409,24 @@ export default function Dashboard() {
         Math.round((phase.kebutuhan_air || 0) / activeScheduleCount * 100) / 100 : // Round to 2 decimal places
         0;
 
+      // Generate configId based on land name
+      let configId = 1; // Default configId
+      if (land.name.toLowerCase().includes('lahan 1')) {
+        configId = 1;
+      } else if (land.name.toLowerCase().includes('lahan 2')) {
+        configId = 2;
+      } else if (land.name.toLowerCase().includes('lahan 3')) {
+        configId = 3;
+      } else {
+        // If land name doesn't match pattern, use a hash-based approach or sequential ID
+        // For now, we'll use the first character of landId as a simple approach
+        const landIndex = fertigationLands.findIndex(l => l.id === landId);
+        configId = landIndex >= 0 ? landIndex + 1 : 1;
+      }
+
       // Prepare irrigation configuration data
       const irrigationConfig: IrrigationConfig = {
+        configId: configId,
         landName: land.name,
         phaseName: phase.nama_fase_tanam,
         waterRequirement: phase.kebutuhan_air || 0,
@@ -427,7 +443,7 @@ export default function Dashboard() {
       const success = sendIrrigationConfig(irrigationConfig);
       
       if (success) {
-        console.log('Irrigation configuration sent to ESP32 successfully');
+        console.log(`Irrigation configuration sent to ESP32 successfully for ${land.name} (Config ID: ${configId})`);
       } else {
         console.error('Failed to send irrigation configuration to ESP32');
       }
@@ -436,29 +452,81 @@ export default function Dashboard() {
     }
   };
 
-  // Function to send all lands configuration to ESP32
+  // Function to send all lands configuration to ESP32 in one batch payload
   const sendAllLandsConfigToESP32 = async () => {
     try {
-      let successCount = 0;
-      let totalLands = 0;
+      const allConfigs: IrrigationConfig[] = [];
 
       for (const land of fertigationLands) {
         if (land.current_phase_id) {
-          totalLands++;
-          await sendIrrigationConfigToESP32(land.id, land.current_phase_id);
-          successCount++;
-          // Add small delay between sends to avoid overwhelming MQTT
-          await new Promise(resolve => setTimeout(resolve, 100));
+          const phase = plantingPhases.find(p => p.id === land.current_phase_id);
+          if (!phase) {
+            console.warn(`Phase not found for land ${land.name}`);
+            continue;
+          }
+
+          // Get irrigation schedules for this phase
+          const { data: schedules, error: schedulesError } = await getIrrigationSchedulesByPhase(land.current_phase_id);
+          if (schedulesError) {
+            console.error(`Error getting irrigation schedules for ${land.name}:`, schedulesError);
+            continue;
+          }
+
+          // Calculate water per schedule based on active schedules
+          const activeSchedules = (schedules || []).filter(schedule => schedule.is_active);
+          const activeScheduleCount = activeSchedules.length;
+          const waterPerSchedule = activeScheduleCount > 0 ? 
+            Math.round((phase.kebutuhan_air || 0) / activeScheduleCount * 100) / 100 : // Round to 2 decimal places
+            0;
+
+          // Generate configId based on land name
+          let configId = 1; // Default configId
+          if (land.name.toLowerCase().includes('lahan 1')) {
+            configId = 1;
+          } else if (land.name.toLowerCase().includes('lahan 2')) {
+            configId = 2;
+          } else if (land.name.toLowerCase().includes('lahan 3')) {
+            configId = 3;
+          } else {
+            // If land name doesn't match pattern, use a hash-based approach or sequential ID
+            const landIndex = fertigationLands.findIndex(l => l.id === land.id);
+            configId = landIndex >= 0 ? landIndex + 1 : 1;
+          }
+
+          // Prepare irrigation configuration data
+          const irrigationConfig: IrrigationConfig = {
+            configId: configId,
+            landName: land.name,
+            phaseName: phase.nama_fase_tanam,
+            waterRequirement: phase.kebutuhan_air || 0,
+            waterPerSchedule: waterPerSchedule,
+            targetEC: phase.target_ec || 0,
+            irrigationType: phase.jenis_irigasi,
+            schedules: (schedules || []).map(schedule => ({
+              time: schedule.time,
+              isActive: schedule.is_active
+            }))
+          };
+
+          allConfigs.push(irrigationConfig);
         }
       }
 
-      if (successCount > 0) {
-        console.log(`Successfully sent configuration for ${successCount}/${totalLands} lands to ESP32`);
+      if (allConfigs.length > 0) {
+        // Send all configurations in one batch payload
+        const success = sendMultipleIrrigationConfigs(allConfigs);
+        
+        if (success) {
+          console.log(`Successfully sent ${allConfigs.length} irrigation configurations in one batch to ESP32`);
+          console.log('Batch payload contains configs for:', allConfigs.map(config => config.landName).join(', '));
+        } else {
+          console.error('Failed to send batch irrigation configuration to ESP32');
+        }
       } else {
         console.log('No configured lands found to send to ESP32');
       }
     } catch (error) {
-      console.error('Error sending all lands config to ESP32:', error);
+      console.error('Error sending batch config to ESP32:', error);
     }
   };
 
@@ -568,13 +636,8 @@ export default function Dashboard() {
   // Function to send phase configuration to ESP32 for all lands using this phase
   const sendPhaseConfigToESP32 = async (phaseId: string) => {
     try {
-      // Find all lands using this phase
-      const landsUsingPhase = fertigationLands.filter(land => land.current_phase_id === phaseId);
-      
-      // Send configuration for each land using this phase
-      for (const land of landsUsingPhase) {
-        await sendIrrigationConfigToESP32(land.id, phaseId);
-      }
+      // Send all lands configuration to ESP32 via MQTT in one batch
+      await sendAllLandsConfigToESP32();
     } catch (error) {
       console.error('Error sending phase config to ESP32:', error);
     }
