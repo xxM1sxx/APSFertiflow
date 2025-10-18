@@ -1,14 +1,16 @@
 import mqtt from 'mqtt';
 import type { MqttClient, IClientOptions } from 'mqtt';
+import { getUserMqttId } from './supabase';
 
 // MQTT Configuration (hardcoded here per request, no .env usage)
 const MQTT_BROKER = '164d4421be27493fac52acabe1391e0f.s1.eu.hivemq.cloud';
 const MQTT_PORT = 8884;
 const MQTT_USERNAME = 'TSADevs';
 const MQTT_PASSWORD = 'Tekno2025!';
-// Generate unique client ID to prevent conflicts
-const MQTT_CLIENT_ID = `web-client-1`;
 const MQTT_USE_SSL = true;
+
+// Dynamic MQTT Client ID - will be set per user
+let MQTT_CLIENT_ID = 'web-client-default';
 
 // Topic Prefixes
 const TOPIC_PREFIX = 'silagung';
@@ -35,11 +37,40 @@ let reconnectAttempts = 0;
 const maxReconnectAttempts = 5;
 
 /**
- * Connect to MQTT broker - Updated based on reference code
+ * Initialize MQTT Client ID for current user
  */
-export const connectMqtt = (): Promise<boolean> => {
-  return new Promise((resolve, reject) => {
+const initializeMqttClientId = async (): Promise<string> => {
+  try {
+    const { data: mqttId, error } = await getUserMqttId();
+    
+    if (error) {
+      console.error('❌ Failed to get user MQTT ID:', error);
+      // Fallback to default with timestamp
+      return `web-client-fallback-${Date.now()}`;
+    }
+    
+    if (mqttId) {
+      console.log('✅ Using user-specific MQTT ID:', mqttId);
+      return mqttId;
+    }
+    
+    // Fallback if no MQTT ID found
+    return `web-client-fallback-${Date.now()}`;
+  } catch (error) {
+    console.error('❌ Error initializing MQTT Client ID:', error);
+    return `web-client-error-${Date.now()}`;
+  }
+};
+
+/**
+ * Connect to MQTT broker - Updated to use user-specific client ID
+ */
+export const connectMqtt = async (): Promise<boolean> => {
+  return new Promise(async (resolve, reject) => {
     try {
+      // Initialize user-specific MQTT Client ID
+      MQTT_CLIENT_ID = await initializeMqttClientId();
+      
       // Construct broker URL - HiveMQ Cloud WebSocket requires "/mqtt" path
       const brokerUrl = `wss://${MQTT_BROKER}:${MQTT_PORT}/mqtt`;
       
@@ -68,7 +99,7 @@ export const connectMqtt = (): Promise<boolean> => {
       client = mqtt.connect(brokerUrl, options);
 
       client.on('connect', () => {
-        console.log('✅ Connected to HiveMQ broker');
+        console.log('✅ Connected to HiveMQ broker with Client ID:', MQTT_CLIENT_ID);
         isConnected = true;
         reconnectAttempts = 0;
         connectionListeners.forEach(listener => listener(true));

@@ -199,3 +199,120 @@ export async function deleteIrrigationSchedule(id: string) {
     .eq('id', id);
   return { data, error };
 }
+
+// User MQTT ID Types and Functions
+export interface UserMqttId {
+  id: string;
+  user_id: string;
+  mqtt_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// Get or create MQTT ID for current user
+export async function getUserMqttId(): Promise<{ data: string | null; error: any }> {
+  try {
+    // Get current user
+    const { data: { user }, error: userError } = await supabase.auth.getUser();
+    
+    if (userError || !user) {
+      return { data: null, error: userError || new Error('User not authenticated') };
+    }
+
+    // Check if user already has an MQTT ID
+    const { data: existingMqttId, error: fetchError } = await supabase
+      .from('user_mqtt_ids')
+      .select('mqtt_id')
+      .eq('user_id', user.id)
+      .single();
+
+    if (fetchError && fetchError.code !== 'PGRST116') { // PGRST116 = no rows returned
+      return { data: null, error: fetchError };
+    }
+
+    // If MQTT ID exists, return it
+    if (existingMqttId) {
+      return { data: existingMqttId.mqtt_id, error: null };
+    }
+
+    // Generate new MQTT ID using database function
+    const { data: newMqttId, error: generateError } = await supabase
+      .rpc('generate_unique_mqtt_id');
+
+    if (generateError) {
+      return { data: null, error: generateError };
+    }
+
+    // Insert new MQTT ID for user
+    const { data: insertedData, error: insertError } = await supabase
+      .from('user_mqtt_ids')
+      .insert({
+        user_id: user.id,
+        mqtt_id: newMqttId
+      })
+      .select('mqtt_id')
+      .single();
+
+    if (insertError) {
+      return { data: null, error: insertError };
+    }
+
+    return { data: insertedData.mqtt_id, error: null };
+  } catch (error) {
+    return { data: null, error };
+  }
+}
+
+// Get MQTT ID for a specific user (admin function)
+export async function getMqttIdForUser(userId: string): Promise<{ data: string | null; error: any }> {
+  const { data, error } = await supabase
+    .from('user_mqtt_ids')
+    .select('mqtt_id')
+    .eq('user_id', userId)
+    .single();
+
+  if (error && error.code !== 'PGRST116') {
+    return { data: null, error };
+  }
+
+  return { data: data?.mqtt_id || null, error: null };
+}
+
+// Regenerate MQTT ID for current user
+export async function regenerateUserMqttId(): Promise<{ data: string | null; error: any }> {
+  try {
+    // Get current user
+    const { data: { user }, error: userError } = await supabase.auth.getUser();
+    
+    if (userError || !user) {
+      return { data: null, error: userError || new Error('User not authenticated') };
+    }
+
+    // Generate new MQTT ID
+    const { data: newMqttId, error: generateError } = await supabase
+      .rpc('generate_unique_mqtt_id');
+
+    if (generateError) {
+      return { data: null, error: generateError };
+    }
+
+    // Update or insert MQTT ID
+    const { data: upsertedData, error: upsertError } = await supabase
+      .from('user_mqtt_ids')
+      .upsert({
+        user_id: user.id,
+        mqtt_id: newMqttId,
+        updated_at: new Date().toISOString()
+      })
+      .select('mqtt_id')
+      .single();
+
+    if (upsertError) {
+      return { data: null, error: upsertError };
+    }
+
+    return { data: upsertedData.mqtt_id, error: null };
+  } catch (error) {
+    return { data: null, error };
+  }
+}

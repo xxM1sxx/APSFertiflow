@@ -66,7 +66,7 @@ export default function Login() {
         
         <button 
           type="submit" 
-          className="auth-button"
+          className={`auth-button ${loading ? 'loading' : ''}`}
           disabled={loading}
         >
           {loading ? 'Memproses...' : 'Login'}

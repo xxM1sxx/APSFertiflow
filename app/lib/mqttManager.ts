@@ -1,10 +1,12 @@
 import { connectMqtt, disconnectMqtt, addConnectionListener, removeConnectionListener } from './mqtt';
+import { getSession } from './supabase';
 
 class MqttManager {
   private static instance: MqttManager;
   private isConnecting = false;
   private connectionPromise: Promise<boolean> | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private currentUserId: string | null = null;
 
   private constructor() {}
 
@@ -16,6 +18,24 @@ class MqttManager {
   }
 
   async connect(): Promise<boolean> {
+    // Check if user is authenticated before connecting
+    const { data: session, error } = await getSession();
+    
+    if (error || !session?.session?.user) {
+      console.error('❌ User not authenticated, cannot connect to MQTT');
+      return false;
+    }
+
+    const userId = session.session.user.id;
+    
+    // If user changed, disconnect first
+    if (this.currentUserId && this.currentUserId !== userId) {
+      console.log('👤 User changed, disconnecting previous MQTT connection');
+      this.disconnect();
+    }
+    
+    this.currentUserId = userId;
+
     // Prevent multiple simultaneous connection attempts
     if (this.isConnecting && this.connectionPromise) {
       console.log('🔄 Connection already in progress, waiting...');
@@ -36,11 +56,11 @@ class MqttManager {
 
   private async attemptConnection(): Promise<boolean> {
     try {
-      console.log('🔌 Attempting MQTT connection...');
+      console.log('🔌 Attempting MQTT connection for user:', this.currentUserId);
       const connected = await connectMqtt();
       
       if (connected) {
-        console.log('✅ MQTT connection successful');
+        console.log('✅ MQTT connection successful for user:', this.currentUserId);
         this.clearReconnectTimer();
       }
       
@@ -76,11 +96,16 @@ class MqttManager {
     disconnectMqtt();
     this.isConnecting = false;
     this.connectionPromise = null;
+    this.currentUserId = null;
   }
 
   onConnectionChange(callback: (connected: boolean) => void): () => void {
     addConnectionListener(callback);
     return () => removeConnectionListener(callback);
+  }
+
+  getCurrentUserId(): string | null {
+    return this.currentUserId;
   }
 }
 

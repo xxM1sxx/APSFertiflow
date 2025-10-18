@@ -8,6 +8,7 @@ import '../styles/auth.scss';
 
 export default function Dashboard() {
   const [loading, setLoading] = useState(true);
+  const [logoutLoading, setLogoutLoading] = useState(false);
   const [activeMenu, setActiveMenu] = useState('dashboard');
   const [user, setUser] = useState<any>(null);
   const [mqttConnected, setMqttConnected] = useState(false);
@@ -206,8 +207,15 @@ export default function Dashboard() {
 
 
   const handleSignOut = async () => {
-    await signOut();
-    navigate('/');
+    setLogoutLoading(true);
+    try {
+      await signOut();
+      navigate('/');
+    } catch (error) {
+      console.error('Error during logout:', error);
+    } finally {
+      setLogoutLoading(false);
+    }
   };
 
   const handleUpdateProfile = async () => {
@@ -935,12 +943,17 @@ export default function Dashboard() {
           <div className="mt-8 px-4">
             <button 
               onClick={handleSignOut}
-              className="w-full flex items-center px-4 py-3 text-left rounded-lg text-red-600 hover:bg-red-50 transition-colors"
+              disabled={logoutLoading}
+              className={`w-full flex items-center px-4 py-3 text-left rounded-lg text-red-600 hover:bg-red-50 transition-colors ${logoutLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
-              <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-              </svg>
-              Logout
+              {logoutLoading ? (
+                <div className="loading-spinner mr-3"></div>
+              ) : (
+                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+              )}
+              {logoutLoading ? 'Logging out...' : 'Logout'}
             </button>
           </div>
         </nav>
