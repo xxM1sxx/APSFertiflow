@@ -316,3 +316,78 @@ export async function regenerateUserMqttId(): Promise<{ data: string | null; err
     return { data: null, error };
   }
 }
+
+// Relay Status Interface and Functions
+export interface RelayStatus {
+  id?: string;
+  user_id?: string;
+  relay1: boolean;
+  relay2: boolean;
+  relay3: boolean;
+  relay4: boolean;
+  relay5: boolean;
+  relay6: boolean;
+  pump: boolean;
+  updated_at?: string;
+  created_at?: string;
+}
+
+export async function getRelayStatus() {
+  const { data: { user } } = await supabase.auth.getUser();
+  
+  if (!user) {
+    return { data: null, error: new Error('User not authenticated') };
+  }
+
+  const { data, error } = await supabase
+    .from('relay_status')
+    .select('*')
+    .eq('user_id', user.id)
+    .order('updated_at', { ascending: false })
+    .limit(1);
+  
+  // Return the first record if exists, otherwise return null
+  return { 
+    data: data && data.length > 0 ? data[0] : null, 
+    error 
+  };
+}
+
+export async function upsertRelayStatus(relayStatus: Omit<RelayStatus, 'id' | 'user_id' | 'created_at' | 'updated_at'>) {
+  const { data: { user } } = await supabase.auth.getUser();
+  
+  if (!user) {
+    return { data: null, error: new Error('User not authenticated') };
+  }
+
+  const { data, error } = await supabase
+    .from('relay_status')
+    .upsert({
+      user_id: user.id,
+      ...relayStatus,
+      updated_at: new Date().toISOString()
+    })
+    .select()
+    .single();
+  
+  return { data, error };
+}
+
+export async function createRelayStatus(relayStatus: Omit<RelayStatus, 'id' | 'user_id' | 'created_at' | 'updated_at'>) {
+  const { data: { user } } = await supabase.auth.getUser();
+  
+  if (!user) {
+    return { data: null, error: new Error('User not authenticated') };
+  }
+
+  const { data, error } = await supabase
+    .from('relay_status')
+    .insert([{
+      user_id: user.id,
+      ...relayStatus
+    }])
+    .select()
+    .single();
+  
+  return { data, error };
+}

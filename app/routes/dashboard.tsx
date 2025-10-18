@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { getSession, signOut, supabase, updatePassword, updateUserProfile, getPlantingPhases, createPlantingPhase, updatePlantingPhase, deletePlantingPhase, getFertigationLands, updateFertigationLand, getIrrigationSchedules, createIrrigationSchedule, updateIrrigationSchedule, deleteIrrigationSchedule, getIrrigationSchedulesByPhase } from '../lib/supabase';
+import { getSession, signOut, supabase, updatePassword, updateUserProfile, getPlantingPhases, createPlantingPhase, updatePlantingPhase, deletePlantingPhase, getFertigationLands, updateFertigationLand, getIrrigationSchedules, createIrrigationSchedule, updateIrrigationSchedule, deleteIrrigationSchedule, getIrrigationSchedulesByPhase, getRelayStatus, upsertRelayStatus, type RelayStatus } from '../lib/supabase';
 import type { PlantingPhase, FertigationLand, IrrigationSchedule } from '../lib/supabase';
 import { subscribeTopic, unsubscribeTopic, publish, mqttTopics, sendIrrigationConfig, sendMultipleIrrigationConfigs, type IrrigationConfig } from '../lib/mqtt';
 import MqttManager from '../lib/mqttManager';
@@ -29,6 +29,16 @@ export default function Dashboard() {
 
   // Relay states for controlling valves and pump
   const [relayStates, setRelayStates] = useState({
+    valve1: false,
+    valve2: false,
+    valve3: false,
+    valve4: false,
+    valve5: false,
+    pump: false
+  });
+
+  // Pending states - for UI feedback while waiting for ESP32 response
+  const [pendingStates, setPendingStates] = useState({
     valve1: false,
     valve2: false,
     valve3: false,
@@ -91,19 +101,27 @@ export default function Dashboard() {
   };
 
   const toggleRelay = (relayName: keyof typeof relayStates) => {
-    // Update local state
+    // Set pending state to show loading/waiting state
     const newState = !relayStates[relayName];
-    setRelayStates(prev => ({
+    setPendingStates(prev => ({
       ...prev,
-      [relayName]: newState
+      [relayName]: true
     }));
     
-    // Publish to MQTT
+    // Publish to MQTT - don't change actual relay state yet
     const relayNumber = relayMapping[relayName];
     const message = { [`relay${relayNumber}`]: newState ? "on" : "off" };
     
     console.log(`Publishing control message for ${relayName}:`, message);
     publish(mqttTopics.control, message);
+    
+    // Clear pending state after timeout (fallback if no ESP32 response)
+    setTimeout(() => {
+      setPendingStates(prev => ({
+        ...prev,
+        [relayName]: false
+      }));
+    }, 5000); // 5 second timeout
   };
 
   // Handler untuk menerima data sensor dari MQTT
@@ -142,6 +160,119 @@ export default function Dashboard() {
     }
   };
 
+  // Handle relay status messages from ESP32
+  const handleRelayStatus = async (message: string) => {
+    console.log('🔄 handleRelayStatus called with message:', message);
+    try {
+      const relayData = JSON.parse(message);
+      console.log('✅ Parsed relay data:', relayData);
+      
+      // Map relay data to our state format
+      const relayStatus: Omit<RelayStatus, 'id' | 'user_id' | 'created_at' | 'updated_at'> = {
+        relay1: relayData.relay1 === 'on',
+        relay2: relayData.relay2 === 'on',
+        relay3: relayData.relay3 === 'on',
+        relay4: relayData.relay4 === 'on',
+        relay5: relayData.relay5 === 'on',
+        relay6: relayData.relay6 === 'on',
+        pump: relayData.relay6 === 'on' // relay6 is the pump
+      };
+      
+      console.log('🔄 Mapped relay status:', relayStatus);
+      
+      // Update local state
+      const newRelayStates = {
+        valve1: relayStatus.relay1, // Nutrisi
+        valve2: relayStatus.relay2, // Air
+        valve3: relayStatus.relay3, // Lahan 1
+        valve4: relayStatus.relay4, // Lahan 2
+        valve5: relayStatus.relay5, // Lahan 3
+        pump: relayStatus.pump      // Pompa
+      };
+      
+      console.log('🔄 Setting new relay states:', newRelayStates);
+      setRelayStates(newRelayStates);
+      
+      // Clear all pending states since we received ESP32 feedback
+      setPendingStates({
+        valve1: false,
+        valve2: false,
+        valve3: false,
+        valve4: false,
+        valve5: false,
+        pump: false
+      });
+      
+      console.log('✅ Cleared all pending states after ESP32 feedback');
+      
+      // Save to database
+      const { error } = await upsertRelayStatus(relayStatus);
+      if (error) {
+        console.error('❌ Error saving relay status to database:', error);
+      } else {
+        console.log('✅ Relay status saved to database successfully');
+      }
+    } catch (error) {
+      console.error('❌ Error parsing relay status message:', error, 'Raw message:', message);
+    }
+  };
+
+  // Load relay states from database on initialization
+  const loadRelayStates = async () => {
+    try {
+      const { data, error } = await getRelayStatus();
+      if (error) {
+        console.error('❌ Error loading relay status from database:', error);
+        // Initialize with default OFF states if no data exists
+        console.log('🔄 Initializing with default relay states (all OFF)');
+        setRelayStates({
+          valve1: false,
+          valve2: false,
+          valve3: false,
+          valve4: false,
+          valve5: false,
+          pump: false
+        });
+        return;
+      }
+      
+      if (data) {
+        const loadedStates = {
+          valve1: data.relay1,
+          valve2: data.relay2,
+          valve3: data.relay3,
+          valve4: data.relay4,
+          valve5: data.relay5,
+          pump: data.pump
+        };
+        setRelayStates(loadedStates);
+        console.log('✅ Relay states loaded from database:', loadedStates);
+      } else {
+        // No data found, initialize with default OFF states
+        console.log('🔄 No relay status found in database, initializing with default states (all OFF)');
+        setRelayStates({
+          valve1: false,
+          valve2: false,
+          valve3: false,
+          valve4: false,
+          valve5: false,
+          pump: false
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error loading relay states:', error);
+      // Fallback to default states
+      setRelayStates({
+        valve1: false,
+        valve2: false,
+        valve3: false,
+        valve4: false,
+        valve5: false,
+        pump: false
+      });
+    }
+  };
+
   useEffect(() => {
     const mqttManager = MqttManager.getInstance();
     let connectionCleanup: (() => void) | null = null;
@@ -162,6 +293,8 @@ export default function Dashboard() {
           loadPlantingPhases();
           // Load fertigation data
           loadFertigationData();
+          // Load relay states from database
+          loadRelayStates();
           
           // Setup MQTT connection with manager
           setMqttStatus('Menghubungkan...');
@@ -171,10 +304,20 @@ export default function Dashboard() {
             setMqttConnected(connected);
             if (connected) {
               setMqttStatus('Terhubung ke MQTT broker');
+              console.log('MQTT connected successfully');
+              
               // Subscribe ke topik sensor
+              console.log('Subscribing to silagung/sensor topic...');
               subscribeTopic('silagung/sensor', handleSensorData);
+              
+              // Subscribe ke topik relay status
+              console.log('Subscribing to silagung/system topic...');
+              subscribeTopic('silagung/system', handleRelayStatus);
+              
+              console.log('All MQTT subscriptions completed');
             } else {
               setMqttStatus('Koneksi MQTT terputus');
+              console.log('MQTT connection lost');
             }
           });
 
@@ -197,6 +340,7 @@ export default function Dashboard() {
     // Cleanup: Putuskan koneksi MQTT saat komponen unmount
     return () => {
       unsubscribeTopic('silagung/sensor');
+      unsubscribeTopic('silagung/system');
       if (connectionCleanup) {
         connectionCleanup();
       }
@@ -735,13 +879,16 @@ export default function Dashboard() {
                 <span className="font-medium">Valve Nutrisi</span>
                 <button
                   onClick={() => toggleRelay('valve1')}
+                  disabled={pendingStates.valve1}
                   className={`px-4 py-2 rounded-md font-medium transition-colors ${
-                    relayStates.valve1 
-                      ? 'bg-green-500 text-white' 
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    pendingStates.valve1
+                      ? 'bg-yellow-400 text-white cursor-not-allowed'
+                      : relayStates.valve1 
+                        ? 'bg-green-500 text-white' 
+                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                   }`}
                 >
-                  {relayStates.valve1 ? 'ON' : 'OFF'}
+                  {pendingStates.valve1 ? 'MENUNGGU...' : (relayStates.valve1 ? 'ON' : 'OFF')}
                 </button>
               </div>
               
@@ -749,13 +896,16 @@ export default function Dashboard() {
                 <span className="font-medium">Valve Air</span>
                 <button
                   onClick={() => toggleRelay('valve2')}
+                  disabled={pendingStates.valve2}
                   className={`px-4 py-2 rounded-md font-medium transition-colors ${
-                    relayStates.valve2 
-                      ? 'bg-green-500 text-white' 
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    pendingStates.valve2
+                      ? 'bg-yellow-400 text-white cursor-not-allowed'
+                      : relayStates.valve2 
+                        ? 'bg-green-500 text-white' 
+                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                   }`}
                 >
-                  {relayStates.valve2 ? 'ON' : 'OFF'}
+                  {pendingStates.valve2 ? 'MENUNGGU...' : (relayStates.valve2 ? 'ON' : 'OFF')}
                 </button>
               </div>
               
@@ -763,13 +913,16 @@ export default function Dashboard() {
                 <span className="font-medium">Valve Lahan 1</span>
                 <button
                   onClick={() => toggleRelay('valve3')}
+                  disabled={pendingStates.valve3}
                   className={`px-4 py-2 rounded-md font-medium transition-colors ${
-                    relayStates.valve3 
-                      ? 'bg-green-500 text-white' 
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    pendingStates.valve3
+                      ? 'bg-yellow-400 text-white cursor-not-allowed'
+                      : relayStates.valve3 
+                        ? 'bg-green-500 text-white' 
+                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                   }`}
                 >
-                  {relayStates.valve3 ? 'ON' : 'OFF'}
+                  {pendingStates.valve3 ? 'MENUNGGU...' : (relayStates.valve3 ? 'ON' : 'OFF')}
                 </button>
               </div>
               
@@ -777,13 +930,16 @@ export default function Dashboard() {
                 <span className="font-medium">Valve Lahan 2</span>
                 <button
                   onClick={() => toggleRelay('valve4')}
+                  disabled={pendingStates.valve4}
                   className={`px-4 py-2 rounded-md font-medium transition-colors ${
-                    relayStates.valve4 
-                      ? 'bg-green-500 text-white' 
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    pendingStates.valve4
+                      ? 'bg-yellow-400 text-white cursor-not-allowed'
+                      : relayStates.valve4 
+                        ? 'bg-green-500 text-white' 
+                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                   }`}
                 >
-                  {relayStates.valve4 ? 'ON' : 'OFF'}
+                  {pendingStates.valve4 ? 'MENUNGGU...' : (relayStates.valve4 ? 'ON' : 'OFF')}
                 </button>
               </div>
               
@@ -791,13 +947,16 @@ export default function Dashboard() {
                 <span className="font-medium">Valve Lahan 3</span>
                 <button
                   onClick={() => toggleRelay('valve5')}
+                  disabled={pendingStates.valve5}
                   className={`px-4 py-2 rounded-md font-medium transition-colors ${
-                    relayStates.valve5 
-                      ? 'bg-green-500 text-white' 
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    pendingStates.valve5
+                      ? 'bg-yellow-400 text-white cursor-not-allowed'
+                      : relayStates.valve5 
+                        ? 'bg-green-500 text-white' 
+                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                   }`}
                 >
-                  {relayStates.valve5 ? 'ON' : 'OFF'}
+                  {pendingStates.valve5 ? 'MENUNGGU...' : (relayStates.valve5 ? 'ON' : 'OFF')}
                 </button>
               </div>
             </div>
@@ -812,13 +971,16 @@ export default function Dashboard() {
                 <span className="font-medium">Pompa</span>
                 <button
                   onClick={() => toggleRelay('pump')}
+                  disabled={pendingStates.pump}
                   className={`px-4 py-2 rounded-md font-medium transition-colors ${
-                    relayStates.pump 
-                      ? 'bg-green-500 text-white' 
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    pendingStates.pump
+                      ? 'bg-yellow-400 text-white cursor-not-allowed'
+                      : relayStates.pump 
+                        ? 'bg-green-500 text-white' 
+                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                   }`}
                 >
-                  {relayStates.pump ? 'ON' : 'OFF'}
+                  {pendingStates.pump ? 'MENUNGGU...' : (relayStates.pump ? 'ON' : 'OFF')}
                 </button>
               </div>
             </div>

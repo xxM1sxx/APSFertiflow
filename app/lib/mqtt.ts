@@ -161,14 +161,23 @@ const handleMessage = (topic: string, message: Buffer): void => {
     }
 
     console.log(`📨 Received message on ${topic}:`, parsedMessage);
+    
+    // Special logging for relay status messages
+    if (topic === 'silagung/system') {
+      console.log('🔄 Processing relay status message from ESP32:', parsedMessage);
+    }
 
     const handler = messageHandlers.get(topic);
     if (handler) {
+      console.log(`🎯 Found handler for topic ${topic}, calling handler...`);
       try {
         handler(messageStr);
+        console.log(`✅ Handler for ${topic} executed successfully`);
       } catch (error) {
         console.error(`❌ Error in message handler for ${topic}:`, error);
       }
+    } else {
+      console.log(`⚠️ No handler found for topic ${topic}`);
     }
   } catch (error) {
     console.error(`❌ Error handling message for ${topic}:`, error);
