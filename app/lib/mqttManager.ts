@@ -6,6 +6,10 @@ class MqttManager {
   private isConnecting = false;
   private connectionPromise: Promise<boolean> | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectDelay = 3000; // Start with 3 seconds (faster initial reconnect)
+  private maxReconnectDelay = 30000; // Max 30 seconds (shorter max)
+  private consecutiveFailures = 0;
+  private isManualDisconnect = false;
   private currentUserId: string | null = null;
 
   private constructor() {}
@@ -62,6 +66,9 @@ class MqttManager {
       if (connected) {
         console.log('✅ MQTT connection successful for user:', this.currentUserId);
         this.clearReconnectTimer();
+        // Reset reconnect delay and failure counter on successful connection
+        this.reconnectDelay = 3000; // Reset to 3 seconds
+        this.consecutiveFailures = 0;
       }
       
       return connected;
@@ -77,11 +84,15 @@ class MqttManager {
       return; // Already scheduled
     }
 
-    console.log('⏰ Scheduling reconnection in 10 seconds...');
+    console.log(`⏰ Scheduling reconnection in ${this.reconnectDelay/1000} seconds...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      console.log(`🔌 Unexpected disconnect, attempting reconnect...`);
       this.connect();
-    }, 10000);
+      // Progressive backoff: increase delay gradually, reset on success
+      this.consecutiveFailures++;
+      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, this.maxReconnectDelay);
+    }, this.reconnectDelay);
   }
 
   private clearReconnectTimer(): void {
@@ -92,11 +103,13 @@ class MqttManager {
   }
 
   disconnect(): void {
+    console.log('🔌 Manual disconnect requested');
+    this.isManualDisconnect = true; // Mark as manual disconnect
     this.clearReconnectTimer();
+    this.currentUserId = null;
     disconnectMqtt();
     this.isConnecting = false;
     this.connectionPromise = null;
-    this.currentUserId = null;
   }
 
   onConnectionChange(callback: (connected: boolean) => void): () => void {

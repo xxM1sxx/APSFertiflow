@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { getSession, signOut, supabase, updatePassword, updateUserProfile, getPlantingPhases, createPlantingPhase, updatePlantingPhase, deletePlantingPhase, getFertigationLands, updateFertigationLand, getIrrigationSchedules, createIrrigationSchedule, updateIrrigationSchedule, deleteIrrigationSchedule, getIrrigationSchedulesByPhase, getRelayStatus, upsertRelayStatus, type RelayStatus } from '../lib/supabase';
+import { getSession, signOut, supabase, updatePassword, updateUserProfile, getPlantingPhases, createPlantingPhase, updatePlantingPhase, deletePlantingPhase, getFertigationLands, updateFertigationLand, getIrrigationSchedules, createIrrigationSchedule, updateIrrigationSchedule, deleteIrrigationSchedule, getIrrigationSchedulesByPhase, getRelayStatus, upsertRelayStatus, saveSensorReading, getLatestSensorReading, type RelayStatus } from '../lib/supabase';
 import type { PlantingPhase, FertigationLand, IrrigationSchedule } from '../lib/supabase';
 import { subscribeTopic, unsubscribeTopic, publish, mqttTopics, sendIrrigationConfig, sendMultipleIrrigationConfigs, type IrrigationConfig } from '../lib/mqtt';
 import MqttManager from '../lib/mqttManager';
@@ -55,11 +55,8 @@ export default function Dashboard() {
     waterFlow: 0,      // L/min
     pressure: 0,       // Bar
     ec: 0,             // μs/cm
-    ph: 0,             // pH
-    nitrogen: 0,       // mg/kg
-    phosphorus: 0,     // mg/kg
-    potassium: 0,      // mg/kg
-    temperature: 0     // °C
+    ultrasonic1: 0,    // cm
+    ultrasonic2: 0     // cm
   });
 
   // Planting phases states
@@ -110,7 +107,8 @@ export default function Dashboard() {
     
     // Publish to MQTT - don't change actual relay state yet
     const relayNumber = relayMapping[relayName];
-    const message = { [`relay${relayNumber}`]: newState ? "on" : "off" };
+    const action = newState ? "open" : "close";
+    const message = { valve: relayNumber, action: action };
     
     console.log(`Publishing control message for ${relayName}:`, message);
     publish(mqttTopics.control, message);
@@ -125,7 +123,9 @@ export default function Dashboard() {
   };
 
   // Handler untuk menerima data sensor dari MQTT
-  const handleSensorData = (message: string) => {
+  const handleSensorData = async (message: string) => {
+    console.log('📡 Raw MQTT message received:', message);
+    
     try {
       // Clean up the message before parsing
       // Remove any extra spaces, newlines, or special characters that might cause parsing issues
@@ -139,24 +139,79 @@ export default function Dashboard() {
         cleanMessage = cleanMessage.replace(/'/g, '"');
       }
       
+      console.log('🧹 Cleaned message:', cleanMessage);
       const data = JSON.parse(cleanMessage);
-      console.log('Received sensor data:', data);
+      console.log('📊 Parsed sensor data:', data);
+      console.log('🔍 Data keys:', Object.keys(data));
+      
+      // Log each sensor value individually
+      console.log('💧 Water Flow:', data.waterFlow || data.water_flow, 'L/min');
+      console.log('🌊 Pressure:', data.pressure, 'Bar');
+      console.log('⚡ EC:', data.ec || data.conductivity, 'μs/cm');
+      console.log('📏 Ultrasonic 1:', data.ultrasonic1 || data.ultrasonic_1, 'cm');
+      console.log('📐 Ultrasonic 2:', data.ultrasonic2 || data.ultrasonic_2, 'cm');
+      console.log('🏷️ Device ID:', data.deviceId || data.device_id || 'Not specified');
       
       // Update sensor data state dengan data yang diterima
       setSensorData({
         waterFlow: data.waterFlow || data.water_flow || 0,
         pressure: data.pressure || 0,
         ec: data.ec || data.conductivity || 0,
-        ph: data.ph || 0,
-        nitrogen: data.nitrogen || data.n || 0,
-        phosphorus: data.phosphorus || data.p || 0,
-        potassium: data.potassium || data.k || 0,
-        temperature: data.temperature || data.temp || 0
+        ultrasonic1: data.ultrasonic1 || data.ultrasonic_1 || 0,
+        ultrasonic2: data.ultrasonic2 || data.ultrasonic_2 || 0
       });
+
+      // Save sensor data to database
+      try {
+        const { error } = await saveSensorReading({
+          water_flow: data.waterFlow || data.water_flow || 0,
+          pressure: data.pressure || 0,
+          ec: data.ec || data.conductivity || 0,
+          ultrasonic1: data.ultrasonic1 || data.ultrasonic_1 || 0,
+          ultrasonic2: data.ultrasonic2 || data.ultrasonic_2 || 0,
+          device_id: data.deviceId || 'esp32-default'
+        });
+        
+        if (error) {
+          console.error('Error saving sensor data:', error);
+        } else {
+          console.log('Sensor data saved successfully');
+        }
+      } catch (saveError) {
+        console.error('Error saving sensor data to database:', saveError);
+      }
     } catch (error) {
       console.error('Error parsing sensor data:', error);
       // Log the problematic message for debugging
       console.log('Problematic message:', message);
+    }
+  };
+
+  // Load latest sensor data from database
+  const loadLatestSensorData = async () => {
+    try {
+      console.log('📊 Loading latest sensor data from database...');
+      const { data, error } = await getLatestSensorReading();
+      
+      if (error) {
+        console.error('❌ Error loading latest sensor data:', error);
+        return;
+      }
+      
+      if (data) {
+        console.log('✅ Loaded latest sensor data from database:', data);
+        setSensorData({
+          waterFlow: data.water_flow || 0,
+          pressure: data.pressure || 0,
+          ec: data.ec || 0,
+          ultrasonic1: data.ultrasonic1 || 0,
+          ultrasonic2: data.ultrasonic2 || 0
+        });
+      } else {
+        console.log('ℹ️ No sensor data found in database, using default values');
+      }
+    } catch (error) {
+      console.error('❌ Error loading latest sensor data:', error);
     }
   };
 
@@ -167,15 +222,15 @@ export default function Dashboard() {
       const relayData = JSON.parse(message);
       console.log('✅ Parsed relay data:', relayData);
       
-      // Map relay data to our state format
+      // Map relay data to our state format - handle both relay and valve formats
       const relayStatus: Omit<RelayStatus, 'id' | 'user_id' | 'created_at' | 'updated_at'> = {
-        relay1: relayData.relay1 === 'on',
-        relay2: relayData.relay2 === 'on',
-        relay3: relayData.relay3 === 'on',
-        relay4: relayData.relay4 === 'on',
-        relay5: relayData.relay5 === 'on',
-        relay6: relayData.relay6 === 'on',
-        pump: relayData.relay6 === 'on' // relay6 is the pump
+        relay1: relayData.relay1 === 'on' || relayData.valve1 === 'open',
+        relay2: relayData.relay2 === 'on' || relayData.valve2 === 'open',
+        relay3: relayData.relay3 === 'on' || relayData.valve3 === 'open',
+        relay4: relayData.relay4 === 'on' || relayData.valve4 === 'open',
+        relay5: relayData.relay5 === 'on' || relayData.valve5 === 'open',
+        relay6: relayData.relay6 === 'on' || relayData.pump === 'on',
+        pump: relayData.relay6 === 'on' || relayData.pump === 'on' // relay6 is the pump
       };
       
       console.log('🔄 Mapped relay status:', relayStatus);
@@ -289,12 +344,18 @@ export default function Dashboard() {
             phone: session.session.user.user_metadata?.phone || '',
             email: session.session.user.email || ''
           });
+          
+          console.log('👤 User logged in:', session.session.user.id);
+          console.log('📡 Setting up MQTT with user ID:', session.session.user.id);
+          
           // Load planting phases data
           loadPlantingPhases();
           // Load fertigation data
           loadFertigationData();
           // Load relay states from database
           loadRelayStates();
+          // Load latest sensor data from database
+          loadLatestSensorData();
           
           // Setup MQTT connection with manager
           setMqttStatus('Menghubungkan...');
@@ -308,7 +369,7 @@ export default function Dashboard() {
               
               // Subscribe ke topik sensor
               console.log('Subscribing to silagung/sensor topic...');
-              subscribeTopic('silagung/sensor', handleSensorData);
+              subscribeTopic(mqttTopics.sensor, handleSensorData);
               
               // Subscribe ke topik relay status
               console.log('Subscribing to silagung/system topic...');
@@ -339,7 +400,7 @@ export default function Dashboard() {
     
     // Cleanup: Putuskan koneksi MQTT saat komponen unmount
     return () => {
-      unsubscribeTopic('silagung/sensor');
+      unsubscribeTopic(mqttTopics.sensor);
       unsubscribeTopic('silagung/system');
       if (connectionCleanup) {
         connectionCleanup();
@@ -1143,9 +1204,9 @@ export default function Dashboard() {
         {activeMenu === 'dashboard' && (
           <>
             {/* Sensor Data Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 mb-8 items-stretch">
               {/* Water Flow Sensor */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Water Flow</p>
@@ -1162,7 +1223,7 @@ export default function Dashboard() {
               </div>
               
               {/* Pressure Sensor */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Pressure</p>
@@ -1188,7 +1249,7 @@ export default function Dashboard() {
               </div>
               
               {/* EC Sensor */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">EC (Conductivity)</p>
@@ -1203,76 +1264,39 @@ export default function Dashboard() {
                 </div>
               </div>
               
-              {/* pH Sensor */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-gray-600">pH Level</p>
-                    <p className="text-2xl font-bold text-gray-900">{sensorData.ph.toFixed(1)}</p>
-                    <p className="text-sm text-purple-600 mt-1">pH</p>
-                  </div>
-                  <div className="p-3 bg-purple-50 rounded-full flex items-center justify-center">
-                    <span className="text-purple-600 font-bold text-lg">pH</span>
-                  </div>
-                </div>
-              </div>
             </div>
 
-            {/* NPK Sensors */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-              {/* Nitrogen Sensor */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+            {/* Ultrasonic Sensors */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 items-stretch">
+              {/* Ultrasonic 1 Sensor */}
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-gray-600">Nitrogen (N)</p>
-                    <p className="text-2xl font-bold text-gray-900">{sensorData.nitrogen.toFixed(0)}</p>
-                    <p className="text-sm text-indigo-600 mt-1">mg/kg(mg/L)</p>
+                    <p className="text-sm font-medium text-gray-600">Ultrasonic 1</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.ultrasonic1.toFixed(0)}</p>
+                    <p className="text-sm text-blue-600 mt-1">cm</p>
                   </div>
-                  <div className="p-3 bg-indigo-50 rounded-full">
-                    <span className="text-indigo-600 font-bold text-lg">N</span>
+                  <div className="p-3 bg-blue-50 rounded-full">
+                    <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14-7H5m14 14H5m14-7H5" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
                   </div>
                 </div>
               </div>
               
-              {/* Phosphorus Sensor */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              {/* Ultrasonic 2 Sensor */}
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-gray-600">Phosphorus (P)</p>
-                    <p className="text-2xl font-bold text-gray-900">{sensorData.phosphorus.toFixed(0)}</p>
-                    <p className="text-sm text-orange-600 mt-1">mg/kg(mg/L)</p>
+                    <p className="text-sm font-medium text-gray-600">Ultrasonic 2</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.ultrasonic2.toFixed(0)}</p>
+                    <p className="text-sm text-green-600 mt-1">cm</p>
                   </div>
-                  <div className="p-3 bg-blue-50 rounded-full flex items-center justify-center">
-                    <span className="text-xl font-bold text-black-600">P</span>
-                  </div>
-                </div>
-              </div>
-              
-              {/* Potassium Sensor */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-gray-600">Potassium (K)</p>
-                    <p className="text-2xl font-bold text-gray-900">{sensorData.potassium.toFixed(0)}</p>
-                    <p className="text-sm text-pink-600 mt-1">mg/kg(mg/L)</p>
-                  </div>
-                  <div className="p-3 bg-pink-50 rounded-full">
-                    <span className="text-xl font-bold text-pink-600">K</span>
-                  </div>
-                </div>
-              </div>
-              
-              {/* Temperature Sensor */}
-              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-gray-600">Temperature</p>
-                    <p className="text-2xl font-bold text-gray-900">{sensorData.temperature.toFixed(1)}</p>
-                    <p className="text-sm text-red-600 mt-1">°C</p>
-                  </div>
-                  <div className="p-3 bg-red-50 rounded-full">
-                    <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 4v10.54a4 4 0 11-4 0V4a2 2 0 012-2h0a2 2 0 012 2z" />
+                  <div className="p-3 bg-green-50 rounded-full">
+                    <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14-7H5m14 14H5m14-7H5" />
+                      <circle cx="12" cy="12" r="3" />
                     </svg>
                   </div>
                 </div>

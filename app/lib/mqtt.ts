@@ -1,9 +1,9 @@
 import mqtt from 'mqtt';
 import type { MqttClient, IClientOptions } from 'mqtt';
-import { getUserMqttId } from './supabase';
+import { getUserMqttId, getSession } from './supabase';
 
 // MQTT Configuration (hardcoded here per request, no .env usage)
-const MQTT_BROKER = '164d4421be27493fac52acabe1391e0f.s1.eu.hivemq.cloud';
+const MQTT_BROKER = '72350f0b16bb43f2af1b3b453ac66c34.s1.eu.hivemq.cloud';
 const MQTT_PORT = 8884;
 const MQTT_USERNAME = 'TSADevs';
 const MQTT_PASSWORD = 'Tekno2025!';
@@ -12,20 +12,31 @@ const MQTT_USE_SSL = true;
 // Dynamic MQTT Client ID - will be set per user
 let MQTT_CLIENT_ID = 'web-client-default';
 
-// Topic Prefixes
+// Topic Prefixes - Clean and organized structure
 const TOPIC_PREFIX = 'silagung';
-const DEVICE_PREFIX = `${TOPIC_PREFIX}/device`;
-const CONTROL_PREFIX = `${TOPIC_PREFIX}/control`;
-const STATUS_PREFIX = `${TOPIC_PREFIX}/status`;
 
-// MQTT Topics
+// MQTT Topics - No conflicts, single source of truth
 export const mqttTopics = {
-  sensorData: `${DEVICE_PREFIX}/sensor`,
-  pumpControl: `${CONTROL_PREFIX}/pump`,
-  systemStatus: `${STATUS_PREFIX}/system`,
-  warning: `${STATUS_PREFIX}/warning`,
-  control: `${TOPIC_PREFIX}/controll`,  // Topic for direct control as requested
-  irrigationConfig: `${TOPIC_PREFIX}/irrigation/config`
+  // Sensor data topics
+  sensor: `${TOPIC_PREFIX}/sensor`,      // ESP32 publishes sensor data here
+  
+  // Control topics  
+  control: `${TOPIC_PREFIX}/control`,     // Web sends control commands here
+  
+  // System status topics
+  system: `${TOPIC_PREFIX}/system`,       // ESP32 publishes system status here
+  
+  // Configuration topics
+  config: `${TOPIC_PREFIX}/config`,       // Configuration messages
+  irrigationConfig: `${TOPIC_PREFIX}/irrigation/config`, // Irrigation config
+  
+  // Legacy topics (for backward compatibility)
+  legacy: {
+    sensorData: `${TOPIC_PREFIX}/device/sensor`,
+    pumpControl: `${TOPIC_PREFIX}/control/pump`,
+    systemStatus: `${TOPIC_PREFIX}/status/system`,
+    warning: `${TOPIC_PREFIX}/status/warning`
+  }
 };
 
 // MQTT Client instance
@@ -35,30 +46,33 @@ let connectionListeners: Array<(connected: boolean) => void> = [];
 let messageHandlers: Map<string, (message: string) => void> = new Map();
 let reconnectAttempts = 0;
 const maxReconnectAttempts = 5;
+let pingInterval: NodeJS.Timeout | null = null;
+let lastMessageTime = Date.now();
+let isManualDisconnect = false;
 
 /**
- * Initialize MQTT Client ID for current user
+ * Initialize MQTT Client ID for current user - Use Supabase user ID
  */
 const initializeMqttClientId = async (): Promise<string> => {
   try {
-    const { data: mqttId, error } = await getUserMqttId();
+    // Get user session from Supabase
+    const { data: session, error: sessionError } = await getSession();
     
-    if (error) {
-      console.error('❌ Failed to get user MQTT ID:', error);
-      // Fallback to default with timestamp
-      return `web-client-fallback-${Date.now()}`;
+    if (sessionError || !session?.session?.user) {
+      console.error('❌ User not authenticated, cannot set MQTT Client ID');
+      return 'web-client-unauthenticated';
     }
     
-    if (mqttId) {
-      console.log('✅ Using user-specific MQTT ID:', mqttId);
-      return mqttId;
-    }
+    // Use Supabase user ID as MQTT Client ID
+    const userId = session.session.user.id;
+    MQTT_CLIENT_ID = `web-client-${userId}`;
+    console.log('✅ MQTT Client ID set from Supabase user:', MQTT_CLIENT_ID);
+    return userId;
     
-    // Fallback if no MQTT ID found
-    return `web-client-fallback-${Date.now()}`;
   } catch (error) {
     console.error('❌ Error initializing MQTT Client ID:', error);
-    return `web-client-error-${Date.now()}`;
+    MQTT_CLIENT_ID = `web-client-error-${Date.now()}`;
+    return MQTT_CLIENT_ID;
   }
 };
 
@@ -82,18 +96,21 @@ export const connectMqtt = async (): Promise<boolean> => {
         clientId: MQTT_CLIENT_ID,
         username: MQTT_USERNAME,
         password: MQTT_PASSWORD,
-        keepalive: 30,
-        reconnectPeriod: 5000,
-        connectTimeout: 10 * 1000,
-        clean: true,
+        keepalive: 60, // 60 seconds
+        reconnectPeriod: 0, // Disable auto-reconnect, we'll handle it manually
+        connectTimeout: 30 * 1000, // 30 seconds
+        clean: false, // Set to false to maintain session state
         protocol: 'wss',
         protocolVersion: 4,
         will: {
-          topic: `${STATUS_PREFIX}/disconnect`,
-          payload: JSON.stringify({ clientId: MQTT_CLIENT_ID, timestamp: Date.now() }),
+          topic: `${mqttTopics.legacy.warning}`,
+          payload: JSON.stringify({ clientId: MQTT_CLIENT_ID, timestamp: Date.now(), status: 'disconnected' }),
           qos: 1,
           retain: false
-        }
+        },
+        // Additional stability options
+        resubscribe: false, // We'll handle resubscription manually
+        queueQoSZero: false // Don't queue QoS 0 messages
       };
 
       client = mqtt.connect(brokerUrl, options);
@@ -102,7 +119,24 @@ export const connectMqtt = async (): Promise<boolean> => {
         console.log('✅ Connected to HiveMQ broker with Client ID:', MQTT_CLIENT_ID);
         isConnected = true;
         reconnectAttempts = 0;
+        lastMessageTime = Date.now();
         connectionListeners.forEach(listener => listener(true));
+        
+        // Start ping interval to keep connection alive
+        if (pingInterval) {
+          clearInterval(pingInterval);
+        }
+        pingInterval = setInterval(() => {
+          if (client && isConnected) {
+            // Send a ping by publishing to a heartbeat topic
+            publish(`${mqttTopics.control}/heartbeat`, JSON.stringify({ 
+              clientId: MQTT_CLIENT_ID, 
+              timestamp: Date.now(),
+              lastMessage: Date.now() - lastMessageTime 
+            }), false, 0);
+          }
+        }, 30000); // Ping every 30 seconds
+        
         // Removed subscribeToTopics() call
         resolve(true);
       });
@@ -117,7 +151,23 @@ export const connectMqtt = async (): Promise<boolean> => {
       client.on('close', () => {
         console.log('🔌 MQTT connection closed');
         isConnected = false;
+        // Clear ping interval
+        if (pingInterval) {
+          clearInterval(pingInterval);
+          pingInterval = null;
+        }
         connectionListeners.forEach(listener => listener(false));
+        
+        // Only trigger reconnect if it's not manual disconnect
+        if (!isManualDisconnect) {
+          console.log('🔌 Unexpected disconnect, will trigger reconnect...');
+          // Notify manager to reconnect (with delay)
+          setTimeout(() => {
+            connectionListeners.forEach(listener => listener(false)); // Trigger reconnect
+          }, 1000); // 1 second delay before notifying manager
+        } else {
+          console.log('🔌 Manual disconnect detected, no auto-reconnect');
+        }
       });
 
       client.on('reconnect', () => {
@@ -159,6 +209,9 @@ const handleMessage = (topic: string, message: Buffer): void => {
     } catch {
       parsedMessage = messageStr;
     }
+
+    // Update last message time
+    lastMessageTime = Date.now();
 
     console.log(`📨 Received message on ${topic}:`, parsedMessage);
     
@@ -248,7 +301,13 @@ export const publish = (topic: string, message: any, retain: boolean = false): b
  */
 export const disconnectMqtt = (): void => {
   if (client) {
-    console.log('🔌 Disconnecting from MQTT broker');
+    console.log('🔌 Manual disconnect - cleaning up MQTT connection');
+    isManualDisconnect = true; // Mark as manual disconnect
+    // Clear ping interval
+    if (pingInterval) {
+      clearInterval(pingInterval);
+      pingInterval = null;
+    }
     // Clear all message handlers
     messageHandlers.clear();
     // Force close the connection
@@ -258,6 +317,10 @@ export const disconnectMqtt = (): void => {
   isConnected = false;
   reconnectAttempts = 0; // Reset reconnect attempts
   connectionListeners.forEach(listener => listener(false));
+  // Reset manual disconnect flag after cleanup
+  setTimeout(() => {
+    isManualDisconnect = false;
+  }, 100);
 };
 
 /**
@@ -389,6 +452,5 @@ export {
   MQTT_USE_SSL,
   TOPIC_PREFIX,
   DEVICE_PREFIX,
-  CONTROL_PREFIX,
-  STATUS_PREFIX
+  CONTROL_PREFIX
 };

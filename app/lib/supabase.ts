@@ -24,6 +24,57 @@ export async function signUp(email: string, password: string, metadata?: { name?
   return { data, error };
 }
 
+/**
+ * Get latest sensor reading from database
+ */
+export async function getLatestSensorReading() {
+  const { data: { user } } = await supabase.auth.getUser();
+  
+  if (!user) {
+    return { data: null, error: new Error('User not authenticated') };
+  }
+
+  const { data, error } = await supabase
+    .from('sensor_readings')
+    .select('*')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+  
+  return { data, error };
+}
+
+/**
+ * Save sensor data to database
+ */
+export async function saveSensorReading(sensorData: {
+  water_flow: number;
+  pressure: number;
+  ec: number;
+  ultrasonic1: number;
+  ultrasonic2: number;
+  device_id?: string;
+}) {
+  const { data: session } = await getSession();
+  const userId = session?.session?.user?.id;
+  
+  const { data, error } = await supabase
+    .from('sensor_readings')
+    .insert([{
+      user_id: userId,
+      water_flow: sensorData.water_flow,
+      pressure: sensorData.pressure,
+      ec: sensorData.ec,
+      ultrasonic1: sensorData.ultrasonic1,
+      ultrasonic2: sensorData.ultrasonic2,
+      mqtt_client_id: sensorData.device_id || 'esp32-default',
+      created_at: new Date().toISOString()
+    }]);
+  
+  return { data, error };
+}
+
 export async function signIn(email: string, password: string) {
   const { data, error } = await supabase.auth.signInWithPassword({
     email,
@@ -340,7 +391,7 @@ export async function getRelayStatus() {
   }
 
   const { data, error } = await supabase
-    .from('relay_status')
+    .from('valve_status')
     .select('*')
     .eq('user_id', user.id)
     .order('updated_at', { ascending: false })
@@ -361,7 +412,7 @@ export async function upsertRelayStatus(relayStatus: Omit<RelayStatus, 'id' | 'u
   }
 
   const { data, error } = await supabase
-    .from('relay_status')
+    .from('valve_status')
     .upsert({
       user_id: user.id,
       ...relayStatus,
