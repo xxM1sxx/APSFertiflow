@@ -389,19 +389,19 @@ export async function getRelayStatus() {
   if (!user) {
     return { data: null, error: new Error('User not authenticated') };
   }
-
+  
   const { data, error } = await supabase
     .from('valve_status')
     .select('*')
     .eq('user_id', user.id)
-    .order('updated_at', { ascending: false })
-    .limit(1);
+    .single();
   
-  // Return the first record if exists, otherwise return null
-  return { 
-    data: data && data.length > 0 ? data[0] : null, 
-    error 
-  };
+  // Treat "no rows" as null data rather than error
+  if (error && (error as any).code === 'PGRST116') {
+    return { data: null, error: null };
+  }
+  
+  return { data, error };
 }
 
 export async function upsertRelayStatus(relayStatus: Omit<RelayStatus, 'id' | 'user_id' | 'created_at' | 'updated_at'>) {
@@ -410,14 +410,17 @@ export async function upsertRelayStatus(relayStatus: Omit<RelayStatus, 'id' | 'u
   if (!user) {
     return { data: null, error: new Error('User not authenticated') };
   }
-
+  
   const { data, error } = await supabase
     .from('valve_status')
-    .upsert({
-      user_id: user.id,
-      ...relayStatus,
-      updated_at: new Date().toISOString()
-    })
+    .upsert(
+      {
+        user_id: user.id,
+        ...relayStatus,
+        updated_at: new Date().toISOString()
+      },
+      { onConflict: 'user_id' }
+    )
     .select()
     .single();
   
@@ -432,7 +435,7 @@ export async function createRelayStatus(relayStatus: Omit<RelayStatus, 'id' | 'u
   }
 
   const { data, error } = await supabase
-    .from('relay_status')
+    .from('valve_status')
     .insert([{
       user_id: user.id,
       ...relayStatus

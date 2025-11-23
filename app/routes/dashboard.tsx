@@ -56,7 +56,8 @@ export default function Dashboard() {
     pressure: 0,       // Bar
     ec: 0,             // μs/cm
     ultrasonic1: 0,    // cm
-    ultrasonic2: 0     // cm
+    ultrasonic2: 0,    // cm
+    ph: 0
   });
 
   // Planting phases states
@@ -158,7 +159,8 @@ export default function Dashboard() {
         pressure: data.pressure || 0,
         ec: data.ec || data.conductivity || 0,
         ultrasonic1: data.ultrasonic1 || data.ultrasonic_1 || 0,
-        ultrasonic2: data.ultrasonic2 || data.ultrasonic_2 || 0
+        ultrasonic2: data.ultrasonic2 || data.ultrasonic_2 || 0,
+        ph: data.ph || 0
       });
 
       // Save sensor data to database
@@ -205,7 +207,8 @@ export default function Dashboard() {
           pressure: data.pressure || 0,
           ec: data.ec || 0,
           ultrasonic1: data.ultrasonic1 || 0,
-          ultrasonic2: data.ultrasonic2 || 0
+          ultrasonic2: data.ultrasonic2 || 0,
+          ph: 0
         });
       } else {
         console.log('ℹ️ No sensor data found in database, using default values');
@@ -1435,7 +1438,7 @@ export default function Dashboard() {
                             background: `linear-gradient(to right, #3B82F6 0%, #3B82F6 ${(pumpFrequency / 60) * 100}%, #E5E7EB ${(pumpFrequency / 60) * 100}%, #E5E7EB 100%)`
                           }}
                         />
-                        <style jsx="true">{`
+                        <style>{`
                           input[type="range"]::-webkit-slider-thumb {
                             appearance: none;
                             width: 20px;

@@ -97,9 +97,9 @@ export const connectMqtt = async (): Promise<boolean> => {
         username: MQTT_USERNAME,
         password: MQTT_PASSWORD,
         keepalive: 60, // 60 seconds
-        reconnectPeriod: 0, // Disable auto-reconnect, we'll handle it manually
+        reconnectPeriod: 1000, // Auto-reconnect every 1 second
         connectTimeout: 30 * 1000, // 30 seconds
-        clean: false, // Set to false to maintain session state
+        clean: false, // Set to false to maintain session state      
         protocol: 'wss',
         protocolVersion: 4,
         will: {
@@ -128,15 +128,30 @@ export const connectMqtt = async (): Promise<boolean> => {
         }
         pingInterval = setInterval(() => {
           if (client && isConnected) {
-            // Send a ping by publishing to a heartbeat topic
-            publish(`${mqttTopics.control}/heartbeat`, JSON.stringify({ 
-              clientId: MQTT_CLIENT_ID, 
+            // Send a ping by publishing to a heartbeat topic        
+            publish(`${mqttTopics.control}/heartbeat`, JSON.stringify({
+              clientId: MQTT_CLIENT_ID,
               timestamp: Date.now(),
-              lastMessage: Date.now() - lastMessageTime 
-            }), false, 0);
+              lastMessage: Date.now() - lastMessageTime
+            }), false);
           }
         }, 30000); // Ping every 30 seconds
-        
+
+        // Resubscribe to previously registered topics after reconnect
+        try {
+          for (const [topic] of messageHandlers) {
+            client?.subscribe(topic, (error) => {
+              if (error) {
+                console.error(`❌ Error resubscribing to ${topic}:`, error);
+              } else {
+                console.log(`✅ Resubscribed to ${topic}`);
+              }
+            });
+          }
+        } catch (resubErr) {
+          console.error('❌ Error during resubscription:', resubErr);
+        }
+
         // Removed subscribeToTopics() call
         resolve(true);
       });
@@ -172,17 +187,8 @@ export const connectMqtt = async (): Promise<boolean> => {
 
       client.on('reconnect', () => {
         reconnectAttempts++;
-        console.log(`🔄 Attempting to reconnect... (${reconnectAttempts}/${maxReconnectAttempts})`);
-        
-        if (reconnectAttempts >= maxReconnectAttempts) {
-          console.error('❌ Max reconnection attempts reached');
-          client?.end(true); // Force close
-          // Reset for future connections
-          setTimeout(() => {
-            reconnectAttempts = 0;
-            console.log('🔄 Resetting reconnection attempts, ready for manual reconnect');
-          }, 30000); // Wait 30 seconds before allowing reconnection
-        }
+        console.log(`🔄 Attempting to reconnect... (#${reconnectAttempts})`);
+        // Do not force-close; let mqtt.js handle reconnection continuously
       });
 
       client.on('message', (topic, message) => {
@@ -451,6 +457,5 @@ export {
   MQTT_CLIENT_ID,
   MQTT_USE_SSL,
   TOPIC_PREFIX,
-  DEVICE_PREFIX,
-  CONTROL_PREFIX
+  
 };
