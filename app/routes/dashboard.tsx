@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
+import Gauge from '../components/Gauge';
+import Tank from '../components/Tank';
 import { useNavigate } from 'react-router';
 import { getSession, signOut, supabase, updatePassword, updateUserProfile, getPlantingPhases, createPlantingPhase, updatePlantingPhase, deletePlantingPhase, getFertigationLands, updateFertigationLand, getIrrigationSchedules, createIrrigationSchedule, updateIrrigationSchedule, deleteIrrigationSchedule, getIrrigationSchedulesByPhase, getRelayStatus, upsertRelayStatus, saveSensorReading, getLatestSensorReading, type RelayStatus } from '../lib/supabase';
 import type { PlantingPhase, FertigationLand, IrrigationSchedule } from '../lib/supabase';
 import { subscribeTopic, unsubscribeTopic, publish, mqttTopics, sendIrrigationConfig, sendMultipleIrrigationConfigs, type IrrigationConfig } from '../lib/mqtt';
 import MqttManager from '../lib/mqttManager';
 import '../styles/auth.scss';
+
 
 export default function Dashboard() {
   const [loading, setLoading] = useState(true);
@@ -56,9 +59,14 @@ export default function Dashboard() {
     pressure: 0,       // Bar
     ec: 0,             // μs/cm
     ultrasonic1: 0,    // cm
-    ultrasonic2: 0,    // cm
-    ph: 0
+    ultrasonic2: 0     // cm
   });
+
+  const [pressureDemoValue, setPressureDemoValue] = useState(0);
+  const [waterFlowDemoValue, setWaterFlowDemoValue] = useState(0);
+  const [ecDemoValue, setEcDemoValue] = useState(0);
+  const [ultrasonic1DemoValue, setUltrasonic1DemoValue] = useState(0);
+  const [ultrasonic2DemoValue, setUltrasonic2DemoValue] = useState(0);
 
   // Planting phases states
   const [plantingPhases, setPlantingPhases] = useState<PlantingPhase[]>([]);
@@ -159,8 +167,7 @@ export default function Dashboard() {
         pressure: data.pressure || 0,
         ec: data.ec || data.conductivity || 0,
         ultrasonic1: data.ultrasonic1 || data.ultrasonic_1 || 0,
-        ultrasonic2: data.ultrasonic2 || data.ultrasonic_2 || 0,
-        ph: data.ph || 0
+        ultrasonic2: data.ultrasonic2 || data.ultrasonic_2 || 0
       });
 
       // Save sensor data to database
@@ -207,8 +214,7 @@ export default function Dashboard() {
           pressure: data.pressure || 0,
           ec: data.ec || 0,
           ultrasonic1: data.ultrasonic1 || 0,
-          ultrasonic2: data.ultrasonic2 || 0,
-          ph: 0
+          ultrasonic2: data.ultrasonic2 || 0
         });
       } else {
         console.log('ℹ️ No sensor data found in database, using default values');
@@ -411,6 +417,22 @@ export default function Dashboard() {
       mqttManager.disconnect();
     };
   }, [navigate]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const pressure = Math.round(Math.random() * 100) / 10; // 0..10
+      const flow = Math.round(Math.random() * 1000) / 10; // 0..100
+      const ec = Math.round(Math.random() * 3500);
+      const u1 = Math.round(Math.random() * 100); // 0..100 cm
+      const u2 = Math.round(Math.random() * 100); // 0..100 cm
+      setPressureDemoValue(pressure);
+      setWaterFlowDemoValue(flow);
+      setEcDemoValue(ec);
+      setUltrasonic1DemoValue(u1);
+      setUltrasonic2DemoValue(u2);
+    }, 1500);
+    return () => clearInterval(id);
+  }, []);
 
 
 
@@ -1060,7 +1082,44 @@ export default function Dashboard() {
               <div className="text-sm text-blue-700">Aliran Air</div>
               <div className="text-xl font-semibold">{sensorData.waterFlow} L/min</div>
             </div>
-            
+
+            {/* Ultrasonic Sensors */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 items-stretch">
+              {/* Ultrasonic 1 Sensor */}
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Water</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.ultrasonic1.toFixed(0)}</p>
+                    <p className="text-sm text-blue-600 mt-1">cm</p>
+                  </div>
+                  <div className="p-3 bg-blue-50 rounded-full">
+                    <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14-7H5m14 14H5m14-7H5" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Ultrasonic 2 Sensor */}
+              <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Ultrasonic 2</p>
+                    <p className="text-2xl font-bold text-gray-900">{sensorData.ultrasonic2.toFixed(0)}</p>
+                    <p className="text-sm text-green-600 mt-1">cm</p>
+                  </div>
+                  <div className="p-3 bg-green-50 rounded-full">
+                    <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14-7H5m14 14H5m14-7H5" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="bg-green-50 p-3 rounded-lg">
               <div className="text-sm text-green-700">Tekanan</div>
               <div className="text-xl font-semibold">{sensorData.pressure} Bar</div>
@@ -1071,10 +1130,7 @@ export default function Dashboard() {
               <div className="text-xl font-semibold">{sensorData.ec} μs/cm</div>
             </div>
             
-            <div className="bg-yellow-50 p-3 rounded-lg">
-              <div className="text-sm text-yellow-700">pH</div>
-              <div className="text-xl font-semibold">{sensorData.ph}</div>
-            </div>
+            
           </div>
         </div>
       </div>
@@ -1269,15 +1325,64 @@ export default function Dashboard() {
               
             </div>
 
-            {/* Ultrasonic Sensors */}
+            {/* Gauge Meters */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 items-stretch">
+              <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-100 h-full min-h-[300px]">
+                <Gauge
+                  label="Waterflow"
+                  value={sensorData.waterFlow}
+                  min={0}
+                  max={100}
+                  unit="L/min"
+                  color="blue"
+                  thresholds={{ warning: 60, danger: 80 }}
+                  majorTicks={6}
+                  minorTicks={3}
+                  labelDecimals={0}
+                  valueDecimals={1}
+                />
+              </div>
+              <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-100 h-full min-h-[300px]">
+                <Gauge
+                  label="Pressure"
+                  value={sensorData.pressure}
+                  min={0}
+                  max={10}
+                  unit="Bar"
+                  color="green"
+                  thresholds={{ warning: 5, danger: 7 }}
+                  majorTicks={6}
+                  minorTicks={3}
+                  labelDecimals={0}
+                  valueDecimals={1}
+                />
+              </div>
+              <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-100 h-full min-h-[300px]">
+                <Gauge
+                  label="EC"
+                  value={sensorData.ec}
+                  min={0}
+                  max={3500}
+                  unit="μS/cm"
+                  color="purple"
+                  thresholds={{ warning: 2500, danger: 3000 }}
+                  majorTicks={6}
+                  minorTicks={3}
+                  labelDecimals={0}
+                  valueDecimals={1}
+                />
+              </div>
+            </div>
+
+            {/* Ultrasonic Sensors (Cards) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 items-stretch">
               {/* Ultrasonic 1 Sensor */}
               <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-gray-600">Ultrasonic 1</p>
+                    <p className="text-sm font-medium text-gray-600">Nutrient Level</p>
                     <p className="text-2xl font-bold text-gray-900">{sensorData.ultrasonic1.toFixed(0)}</p>
-                    <p className="text-sm text-blue-600 mt-1">cm</p>
+                    <p className="text-sm text-blue-600 mt-1">%</p>
                   </div>
                   <div className="p-3 bg-blue-50 rounded-full">
                     <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1292,9 +1397,9 @@ export default function Dashboard() {
               <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-full">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-gray-600">Ultrasonic 2</p>
+                    <p className="text-sm font-medium text-gray-600">Water Level</p>
                     <p className="text-2xl font-bold text-gray-900">{sensorData.ultrasonic2.toFixed(0)}</p>
-                    <p className="text-sm text-green-600 mt-1">cm</p>
+                    <p className="text-sm text-green-600 mt-1">%</p>
                   </div>
                   <div className="p-3 bg-green-50 rounded-full">
                     <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1303,6 +1408,32 @@ export default function Dashboard() {
                     </svg>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            {/* Tank Visualization */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 items-stretch">
+              <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-100 h-full min-h-[300px]">
+                <Tank
+                  label="Tangki Nutrisi"
+                  value={sensorData.ultrasonic1}
+                  capacity={100}
+                  unit="%"
+                  color="green"
+                  thresholds={{ lowPercent: 20 }}
+                  sizeRatio={45}
+                />
+              </div>
+              <div className="bg-white p-8 rounded-xl shadow-sm border border-gray-100 h-full min-h-[300px]">
+                <Tank
+                  label="Tangki Air"
+                  value={sensorData.ultrasonic2}
+                  capacity={100}
+                  unit="%"
+                  color="blue"
+                  thresholds={{ lowPercent: 20 }}
+                  sizeRatio={45}
+                />
               </div>
             </div>
 
